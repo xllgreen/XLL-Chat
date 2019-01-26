@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -53,7 +54,7 @@ func listenAndServe(addr string, mux *http.ServeMux, tlfConf *tls.Config, stop <
 					globals.tlsRedirectHTTP, server.Addr)
 
 				// This is a second HTTP server listenning on a different port.
-				go http.ListenAndServe(globals.tlsRedirectHTTP, tlsRedirect(addr))
+				go http.ListenAndServe(globals.tlsRedirectHTTP, tlsRedirect(server.Addr))
 			}
 
 			log.Printf("Listening for client HTTPS connections on [%s]", server.Addr)
@@ -89,14 +90,14 @@ loop:
 			// While the server shuts down, termianate all sessions.
 			globals.sessionStore.Shutdown()
 
-			// Wait for http server to stop Accept()-ing connections
+			// Wait for http server to stop Accept()-ing connections.
 			<-httpdone
 			cancel()
 
 			// Shutdown local cluster node, if it's a part of a cluster.
 			globals.cluster.shutdown()
 
-			// Terminate plugin connections
+			// Terminate plugin connections.
 			pluginsShutdown()
 
 			// Shutdown gRPC server, if one is configured.
@@ -105,11 +106,14 @@ loop:
 				globals.grpcServer.Stop()
 			}
 
-			// Shutdown the hub. The hub will shutdown topics
+			// Stop publishing statistics.
+			statsShutdown()
+
+			// Shutdown the hub. The hub will shutdown topics.
 			hubdone := make(chan bool)
 			globals.hub.shutdown <- hubdone
 
-			// wait for the hub to finish
+			// Wait for the hub to finish.
 			<-hubdone
 
 			break loop
@@ -207,19 +211,27 @@ func tlsRedirect(toPort string) http.HandlerFunc {
 	}
 
 	return func(wrt http.ResponseWriter, req *http.Request) {
-		target := *req.URL
-		target.Scheme = "https"
-		// Host name is guaranteed to be valid because of TLS whitelist.
-		host, _, _ := net.SplitHostPort(req.Host)
-		if target.Port() != "" {
-			if toPort != "" {
-				// Replace the port number.
-				target.Host = net.JoinHostPort(host, toPort)
-			} else {
-				// Just strip the port number.
-				target.Host = host
-			}
+		host, _, err := net.SplitHostPort(req.Host)
+		if err != nil {
+			// If SplitHostPort has failed assume it's because :port part is missing.
+			host = req.Host
 		}
+
+		target, _ := url.ParseRequestURI(req.RequestURI)
+		target.Scheme = "https"
+
+		// Ensure valid redirect target.
+		if toPort != "" {
+			// Replace the port number.
+			target.Host = net.JoinHostPort(host, toPort)
+		} else {
+			target.Host = host
+		}
+
+		if target.Path == "" {
+			target.Path = "/"
+		}
+
 		http.Redirect(wrt, req, target.String(), http.StatusTemporaryRedirect)
 	}
 }

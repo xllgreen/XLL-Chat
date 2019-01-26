@@ -91,8 +91,6 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 		}
 	}
 
-	log.Println("Creating user", user.Tags)
-
 	if _, err := store.Users.Create(&user, private); err != nil {
 		log.Println("s.acc: failed to create user", err, s.sid)
 		s.queueOut(ErrUnknown(msg.id, "", msg.timestamp))
@@ -150,9 +148,7 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 		}
 	}
 
-	// Save updated tags:
-	log.Println("Updating tags:", rec.Tags)
-
+	// Save tags potentially changed by the validator.
 	if err := store.Users.Update(user.Uid(),
 		map[string]interface{}{"Tags": types.StringSlice(rec.Tags)}); err != nil {
 
@@ -165,14 +161,16 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 
 	var reply *ServerComMessage
 	if msg.Acc.Login {
-		log.Println("Calling onLogin", rec.Tags)
 		// Process user's login request.
 		_, missing := stringSliceDelta(globals.authValidators[rec.AuthLevel], validated)
 		reply = s.onLogin(msg.id, msg.timestamp, rec, missing)
 	} else {
 		// Not using the new account for logging in.
 		reply = NoErrCreated(msg.id, "", msg.timestamp)
-		reply.Ctrl.Params = map[string]interface{}{"user": user.Uid().UserId()}
+		reply.Ctrl.Params = map[string]interface{}{
+			"user":    user.Uid().UserId(),
+			"authlvl": rec.AuthLevel.String(),
+		}
 	}
 	params := reply.Ctrl.Params.(map[string]interface{})
 	params["desc"] = &MsgTopicDesc{
@@ -316,7 +314,8 @@ func replyDelUser(s *Session, msg *ClientComMessage) {
 		authnames := store.GetAuthNames()
 		for _, name := range authnames {
 			if err := store.GetAuthHandler(name).DelRecords(uid); err != nil {
-				log.Println("replyDelUser: failed to delete user auth record", msg.Del.User, name, err, s.sid)
+				// This could be completely benighn, i.e. authenticator exists but not used.
+				log.Println("replyDelUser: failed to delete auth record", uid.UserId(), name, err, s.sid)
 			}
 		}
 
